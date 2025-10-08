@@ -144,9 +144,12 @@ impl AppService {
             let webp_data = webp.to_vec();
 
             if webp_data.len() >= image_bytes.len() {
-                return Err(anyhow::anyhow!("The WebP data is bigger than the original image"))
+                Err(anyhow::anyhow!("The WebP data is bigger than the original image"))
             }
-            Ok(webp_data)
+            else
+            {
+                Ok(webp_data)
+            }
         };
 
         match convert_webp_res {
