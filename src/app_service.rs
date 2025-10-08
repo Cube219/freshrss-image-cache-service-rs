@@ -3,11 +3,11 @@ use std::fmt;
 use crate::dtos::CachedImage;
 use anyhow::{bail, Context, Result};
 use sha3::{Digest, Sha3_256};
+use webp::{Encoder, WebPMemory};
 use std::path::PathBuf;
 use axum::http::HeaderValue;
 use reqwest::Response;
 use tokio::fs;
-use tokio::io::AsyncWriteExt;
 use url::Url;
 
 #[derive(Clone)]
@@ -30,7 +30,6 @@ pub struct AppService {
     disable_https_validation: bool,
     bypass_info: Option<CloudFlareBypassProxy>,
 }
-
 
 #[derive(Debug)]
 struct CaptchaError {
@@ -113,9 +112,6 @@ impl AppService {
         image_url: &Url,
         cached_image_paths: CachedImagePaths,
     ) -> Result<()> {
-        // Make sure the directory for the file exists
-        fs::create_dir_all(cached_image_paths.data_folder).await?;
-
         let mut res = self.try_get_image(image_url, false).await;
         if let Err(err) = res {
             // If not a CAPTCHA error or we can't bypass CloudFlare, return the error
@@ -130,24 +126,38 @@ impl AppService {
             }
         }
 
-        let (image_response, mime_type) = res?;
+        let (image_response, mut mime_type) = res?;
 
         // 1. Save the image content
-        let mut image_file = fs::File::create(cached_image_paths.data_path.clone())
-            .await
-            .with_context(|| {
-                format!(
-                    "Failed to create the '{}' file",
-                    cached_image_paths.data_path.display()
-                )
-            })?;
-        let mut response_content_stream = image_response.bytes_stream();
+        let image_bytes = image_response.bytes().await?;
 
-        use futures_util::stream::StreamExt;
+        // Make sure the directory for the file exists
+        fs::create_dir_all(cached_image_paths.data_folder).await?;
 
-        while let Some(chunk) = response_content_stream.next().await {
-            let chunk = chunk?;
-            image_file.write_all(&chunk).await?;
+        // Try to convert to WebP
+        let convert_webp_res: Result<Vec<u8>> = {
+            let img = image::load_from_memory(&image_bytes)?;
+            let encoder: Encoder = Encoder::from_image(&img)
+                .map_err(|e| anyhow::anyhow!("Failed to create a WebP encoder: {}", e))?;
+            let webp: WebPMemory = encoder.encode_simple(false, 95.0)
+                .map_err(|e| anyhow::anyhow!("Failed to encode to WebP: {:?}", e))?;
+            let webp_data = webp.to_vec();
+
+            if webp_data.len() >= image_bytes.len() {
+                return Err(anyhow::anyhow!("The WebP data is bigger than the original image"))
+            }
+            Ok(webp_data)
+        };
+
+        match convert_webp_res {
+            Ok(webp_data) => {
+                fs::write(&cached_image_paths.data_path, webp_data).await?;
+                mime_type = "image/webp".parse()?;
+            }
+            Err(_) => {
+                // If conversion to WebP failed or its size is bigger, save the original image
+                fs::write(&cached_image_paths.data_path, &image_bytes).await?;
+            }
         }
 
         // 2. Save the mime-type
