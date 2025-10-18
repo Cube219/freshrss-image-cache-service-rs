@@ -135,7 +135,7 @@ impl AppService {
         fs::create_dir_all(cached_image_paths.data_folder).await?;
 
         // Try to convert to WebP
-        let convert_webp_res: Result<Vec<u8>> = {
+        let convert_webp_res_fn = || -> Result<Vec<u8>> {
             let img = image::load_from_memory(&image_bytes)?;
             let encoder: Encoder = Encoder::from_image(&img)
                 .map_err(|e| anyhow::anyhow!("Failed to create a WebP encoder: {}", e))?;
@@ -152,13 +152,15 @@ impl AppService {
             }
         };
 
-        match convert_webp_res {
+        match convert_webp_res_fn() {
             Ok(webp_data) => {
                 fs::write(&cached_image_paths.data_path, webp_data).await?;
                 mime_type = "image/webp".parse()?;
             }
-            Err(_) => {
+            Err(e) => {
                 // If conversion to WebP failed or its size is bigger, save the original image
+                println!("Failed to convert to webp: {}", image_url);
+                println!("    {}", e);
                 fs::write(&cached_image_paths.data_path, &image_bytes).await?;
             }
         }
